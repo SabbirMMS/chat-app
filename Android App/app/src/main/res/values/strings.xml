@@ -1,3 +1,17 @@
 <resources>
-    <string name="app_name">PostgreSQL Chatting</string>
+    <string name="app_name">Realtime Chat</string>
+    <string name="default_base_url">http://10.0.2.2:3000</string>
+    <string name="server_url">Server URL</string>
+    <string name="configure_server">Configure Server URL</string>
+    <string name="login">Sign In</string>
+    <string name="register">Sign Up</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="create_room">Create Room</string>
+    <string name="join_room">Join Room</string>
+    <string name="room_code">Room Code</string>
+    <string name="my_rooms">My Active Rooms</string>
+    <string name="type_a_message">Type a message...</string>
+    <string name="send">Send</string>
+    <string name="logout">Logout</string>
 </resources>

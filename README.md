@@ -53,6 +53,9 @@ Supports both modern Web clients and mobile clients (Android) using the exact sa
 │           ├── join/route.js          # POST /api/rooms/join
 │           └── [code]/
 │               └── messages/route.js  # GET /api/rooms/:code/messages
+├── Android App/                       # Native Android client (Java, Retrofit, Socket.IO)
+│   ├── app/src/main/java/...          # Java activities, socket manager, network models
+│   └── app/build.gradle               # Android build configuration
 └── db/
     └── schema.sql                     # PostgreSQL schema and indexes
 ```

@@ -36,6 +36,20 @@ dependencies {
     implementation libs.appcompat
     implementation libs.constraintlayout
     implementation libs.material
+    implementation 'androidx.recyclerview:recyclerview:1.4.0'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.2.0'
+
+    // Retrofit & OkHttp & Gson
+    implementation 'com.squareup.retrofit2:retrofit:3.0.0'
+    implementation 'com.squareup.retrofit2:converter-gson:3.0.0'
+    implementation 'com.squareup.okhttp3:okhttp:5.5.0'
+    implementation 'com.squareup.okhttp3:logging-interceptor:5.5.0'
+
+    // Socket.IO Client Java
+    implementation ('io.socket:socket.io-client:2.1.2') {
+        exclude group: 'org.json', module: 'json'
+    }
+
     testImplementation libs.junit
     androidTestImplementation libs.espresso.core
     androidTestImplementation libs.ext.junit
