@@ -10,6 +10,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.mrmms.postgresqlchatting.R;
 import com.mrmms.postgresqlchatting.network.models.Message;
+import com.mrmms.postgresqlchatting.network.models.User;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -50,6 +51,32 @@ public class MessageAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         notifyItemInserted(messages.size() - 1);
     }
 
+    public void markMessageSeen(String messageId, User user) {
+        if (messageId == null || user == null) return;
+        for (int i = 0; i < messages.size(); i++) {
+            Message m = messages.get(i);
+            if (messageId.equals(m.getId())) {
+                m.addSeenUser(user);
+                notifyItemChanged(i);
+                break;
+            }
+        }
+    }
+
+    public void markAllSeenByUser(User user) {
+        if (user == null || user.getId() == null) return;
+        boolean changed = false;
+        for (Message m : messages) {
+            if (m.getSender() != null && !user.getId().equals(m.getSender().getId())) {
+                m.addSeenUser(user);
+                changed = true;
+            }
+        }
+        if (changed) {
+            notifyDataSetChanged();
+        }
+    }
+
     @Override
     public int getItemViewType(int position) {
         Message msg = messages.get(position);
@@ -76,11 +103,19 @@ public class MessageAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
         Message msg = messages.get(position);
         String formattedTime = formatTime(msg.getCreatedAt());
+        String seenText = buildSeenText(msg);
 
         if (holder instanceof MeViewHolder) {
             MeViewHolder meHolder = (MeViewHolder) holder;
             meHolder.tvContent.setText(msg.getContent());
             meHolder.tvTime.setText(formattedTime);
+
+            if (!seenText.isEmpty()) {
+                meHolder.tvSeenBy.setText("✓ " + seenText);
+                meHolder.tvSeenBy.setVisibility(View.VISIBLE);
+            } else {
+                meHolder.tvSeenBy.setVisibility(View.GONE);
+            }
         } else if (holder instanceof OtherViewHolder) {
             OtherViewHolder otherHolder = (OtherViewHolder) holder;
             otherHolder.tvContent.setText(msg.getContent());
@@ -89,7 +124,30 @@ public class MessageAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
                     ? msg.getSender().getUsername()
                     : "User";
             otherHolder.tvSender.setText(senderName);
+
+            if (!seenText.isEmpty()) {
+                otherHolder.tvSeenBy.setText(seenText);
+                otherHolder.tvSeenBy.setVisibility(View.VISIBLE);
+            } else {
+                otherHolder.tvSeenBy.setVisibility(View.GONE);
+            }
         }
+    }
+
+    private String buildSeenText(Message msg) {
+        if (msg.getSeenBy() == null || msg.getSeenBy().isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (User u : msg.getSeenBy()) {
+            if (msg.getSender() != null && u.getId() != null && u.getId().equals(msg.getSender().getId())) {
+                continue; // sender already read their own
+            }
+            if (count > 0) sb.append(", ");
+            sb.append(u.getUsername() != null ? u.getUsername() : "user");
+            count++;
+        }
+        if (count == 0) return "";
+        return "Seen by " + sb.toString();
     }
 
     @Override
@@ -117,11 +175,13 @@ public class MessageAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
     static class MeViewHolder extends RecyclerView.ViewHolder {
         final TextView tvContent;
         final TextView tvTime;
+        final TextView tvSeenBy;
 
         MeViewHolder(@NonNull View itemView) {
             super(itemView);
             tvContent = itemView.findViewById(R.id.tvMessageContentMe);
             tvTime = itemView.findViewById(R.id.tvMessageTimeMe);
+            tvSeenBy = itemView.findViewById(R.id.tvSeenByMe);
         }
     }
 
@@ -129,12 +189,14 @@ public class MessageAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder
         final TextView tvContent;
         final TextView tvTime;
         final TextView tvSender;
+        final TextView tvSeenBy;
 
         OtherViewHolder(@NonNull View itemView) {
             super(itemView);
             tvContent = itemView.findViewById(R.id.tvMessageContentOther);
             tvTime = itemView.findViewById(R.id.tvMessageTimeOther);
             tvSender = itemView.findViewById(R.id.tvMessageSenderOther);
+            tvSeenBy = itemView.findViewById(R.id.tvSeenByOther);
         }
     }
 }

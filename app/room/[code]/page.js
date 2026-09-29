@@ -9,11 +9,13 @@ import {
   ArrowLeft,
   Copy,
   Check,
+  CheckCheck,
   Send,
   Users,
   Wifi,
   WifiOff,
   AlertCircle,
+  Eye,
 } from 'lucide-react';
 
 export default function RoomChatPage() {
@@ -31,9 +33,16 @@ export default function RoomChatPage() {
   const [socketStatus, setSocketStatus] = useState('connecting'); // 'connecting' | 'connected' | 'disconnected'
   const [systemNotices, setSystemNotices] = useState([]);
 
+  // Live presence & typing states
+  const [onlineMembers, setOnlineMembers] = useState([]);
+  const [showMembersModal, setShowMembersModal] = useState(false);
+  const [typingUsers, setTypingUsers] = useState([]);
+
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const typingTimerRef = useRef(null);
+  const isTypingRef = useRef(false);
 
   const scrollToBottom = (behavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -61,7 +70,6 @@ export default function RoomChatPage() {
       setUser(stored);
     }
 
-    // Verify token and fetch fresh profile
     fetchWithAuth('/api/me')
       .then((res) => {
         if (!res.ok) throw new Error('Unauthorized');
@@ -75,7 +83,6 @@ export default function RoomChatPage() {
         router.replace('/login');
       });
 
-    // Fetch initial chat history
     async function loadHistory() {
       try {
         setLoadingHistory(true);
@@ -88,6 +95,11 @@ export default function RoomChatPage() {
 
         setMessages(data.messages || []);
         setTimeout(() => scrollToBottom('auto'), 100);
+
+        // Mark messages as seen once loaded
+        if (socketRef.current?.connected) {
+          socketRef.current.emit('mark_all_seen', { code });
+        }
       } catch (err) {
         setError(err.message);
       } finally {
@@ -115,11 +127,14 @@ export default function RoomChatPage() {
 
     socket.on('connect', () => {
       setSocketStatus('connected');
-      // Join room via socket
       socket.emit('join_room', { code }, (response) => {
         if (response && !response.ok) {
           setError(response.error || 'Failed to join socket room');
+        } else if (response && response.members) {
+          setOnlineMembers(response.members);
         }
+        // Mark all existing messages as seen
+        socket.emit('mark_all_seen', { code });
       });
     });
 
@@ -132,16 +147,71 @@ export default function RoomChatPage() {
       setSocketStatus('disconnected');
     });
 
+    // Realtime message arrived
     socket.on('new_message', (message) => {
       if (message.code === code) {
         setMessages((prev) => {
-          // Avoid duplicate messages if already present
           if (prev.some((m) => m.id === message.id)) {
             return prev;
           }
-          return [...prev, message];
+          return [...prev, { ...message, seen_by: message.seen_by || [] }];
         });
         setTimeout(() => scrollToBottom('smooth'), 50);
+
+        // Automatically mark as seen if from another user
+        socket.emit('mark_seen', { code, messageId: message.id });
+      }
+    });
+
+    // Realtime seen events
+    socket.on('message_seen', (data) => {
+      if (data.code === code) {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id === data.messageId) {
+              const currentSeen = m.seen_by || [];
+              if (currentSeen.some((u) => u.id === data.user.id)) return m;
+              return { ...m, seen_by: [...currentSeen, data.user] };
+            }
+            return m;
+          })
+        );
+      }
+    });
+
+    socket.on('room_messages_seen', (data) => {
+      if (data.code === code) {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.sender?.id === data.user.id) return m; // sender already saw their own message
+            const currentSeen = m.seen_by || [];
+            if (currentSeen.some((u) => u.id === data.user.id)) return m;
+            return { ...m, seen_by: [...currentSeen, data.user] };
+          })
+        );
+      }
+    });
+
+    // Realtime typing events
+    socket.on('user_typing', (data) => {
+      if (data.code === code && data.user) {
+        setTypingUsers((prev) => {
+          if (data.isTyping) {
+            if (!prev.includes(data.user.username)) {
+              return [...prev, data.user.username];
+            }
+            return prev;
+          } else {
+            return prev.filter((u) => u !== data.user.username);
+          }
+        });
+      }
+    });
+
+    // Online presence updates
+    socket.on('room_members', (data) => {
+      if (data.code === code && data.members) {
+        setOnlineMembers(data.members);
       }
     });
 
@@ -154,6 +224,7 @@ export default function RoomChatPage() {
     socket.on('user_left', (data) => {
       if (data.code === code && data.user?.username) {
         addSystemNotice(`${data.user.username} left the room`);
+        setTypingUsers((prev) => prev.filter((u) => u !== data.user.username));
       }
     });
 
@@ -161,6 +232,30 @@ export default function RoomChatPage() {
       socket.disconnect();
     };
   }, [code, addSystemNotice]);
+
+  // Handle typing debounce
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setInputContent(val);
+
+    if (!socketRef.current || socketStatus !== 'connected') return;
+
+    if (!isTypingRef.current && val.trim().length > 0) {
+      isTypingRef.current = true;
+      socketRef.current.emit('typing_start', { code });
+    }
+
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+    }
+
+    typingTimerRef.current = setTimeout(() => {
+      if (isTypingRef.current) {
+        isTypingRef.current = false;
+        socketRef.current?.emit('typing_stop', { code });
+      }
+    }, 2500);
+  };
 
   // Send message handler
   const handleSendMessage = (e) => {
@@ -176,7 +271,13 @@ export default function RoomChatPage() {
       return;
     }
 
-    // Clear input immediately for snappy UX
+    // Stop typing immediately
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+    }
+    isTypingRef.current = false;
+    socketRef.current.emit('typing_stop', { code });
+
     setInputContent('');
 
     socketRef.current.emit(
@@ -245,8 +346,19 @@ export default function RoomChatPage() {
           </div>
         </div>
 
-        {/* Status Indicator */}
+        {/* Status & Online Members Indicator */}
         <div className="flex items-center gap-2">
+          {/* Active Members Button */}
+          <button
+            onClick={() => setShowMembersModal(!showMembersModal)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-slate-800 px-3 py-1 text-xs font-medium text-slate-300 hover:bg-slate-700 transition border border-slate-700"
+            title="View Active Room Members"
+          >
+            <Users className="h-3.5 w-3.5 text-indigo-400" />
+            <span>{onlineMembers.length || 1} online</span>
+          </button>
+
+          {/* Connection status */}
           {socketStatus === 'connected' ? (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 border border-emerald-500/20">
               <Wifi className="h-3.5 w-3.5" />
@@ -265,6 +377,35 @@ export default function RoomChatPage() {
           )}
         </div>
       </header>
+
+      {/* Online Members Dropdown / Modal */}
+      {showMembersModal && (
+        <div className="relative z-30 bg-slate-900 border-b border-slate-800 px-4 py-3 animate-in slide-in-from-top-2">
+          <div className="mx-auto max-w-3xl flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Eye className="h-4 w-4 text-indigo-400" />
+              <span className="text-xs font-semibold text-white">Active Members in #{code}:</span>
+            </div>
+            <button
+              onClick={() => setShowMembersModal(false)}
+              className="text-xs text-slate-400 hover:text-white"
+            >
+              Close
+            </button>
+          </div>
+          <div className="mx-auto max-w-3xl mt-2 flex flex-wrap gap-2">
+            {onlineMembers.map((m) => (
+              <span
+                key={m.id}
+                className="inline-flex items-center gap-1.5 rounded-full bg-slate-800/80 px-2.5 py-0.5 text-xs text-slate-300 border border-slate-700"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                @{m.username} {m.id === user?.id && '(You)'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Error Banner */}
       {error && (
@@ -309,6 +450,8 @@ export default function RoomChatPage() {
           ) : (
             messages.map((msg) => {
               const isMe = msg.sender?.id === user?.id;
+              const seenUsers = (msg.seen_by || []).filter((u) => u.id !== msg.sender?.id);
+
               return (
                 <div
                   key={msg.id}
@@ -332,6 +475,16 @@ export default function RoomChatPage() {
                   >
                     {msg.content}
                   </div>
+
+                  {/* Seen Members List / Read Receipts */}
+                  {seenUsers.length > 0 && (
+                    <div className="flex items-center gap-1 mt-1 px-1 text-[11px] text-slate-400">
+                      <CheckCheck className="h-3 w-3 text-indigo-400" />
+                      <span>
+                        Seen by {seenUsers.map((u) => u.username).join(', ')}
+                      </span>
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -339,6 +492,22 @@ export default function RoomChatPage() {
           <div ref={messagesEndRef} />
         </div>
       </div>
+
+      {/* Typing Indicator Banner */}
+      {typingUsers.length > 0 && (
+        <div className="px-4 py-1.5 sm:px-6 bg-slate-900/60 border-t border-slate-800/60">
+          <div className="mx-auto max-w-3xl flex items-center gap-2 text-xs text-indigo-400 font-medium">
+            <div className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-bounce" />
+              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:0.2s]" />
+              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:0.4s]" />
+            </div>
+            <span>
+              {typingUsers.join(', ')} {typingUsers.length > 1 ? 'are' : 'is'} typing...
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Input Bar */}
       <div className="border-t border-slate-800 bg-slate-900/90 p-3 sm:p-4 backdrop-blur-md">
@@ -350,7 +519,7 @@ export default function RoomChatPage() {
             ref={inputRef}
             type="text"
             value={inputContent}
-            onChange={(e) => setInputContent(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             placeholder={
               socketStatus === 'connected'

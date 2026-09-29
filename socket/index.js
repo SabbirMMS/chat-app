@@ -1,6 +1,6 @@
 const { Server } = require('socket.io');
 const { verifyToken } = require('../lib/auth');
-const { getRoomByCode, isMember, saveMessage } = require('../lib/rooms');
+const { getRoomByCode, isMember, saveMessage, markMessageSeen, markAllMessagesSeen } = require('../lib/rooms');
 
 /**
  * Initializes Socket.IO on the given HTTP server
@@ -20,6 +20,23 @@ function initSocket(httpServer) {
     pingTimeout: 20000,
     pingInterval: 25000,
   });
+
+  // Helper to get active members in room
+  function getRoomMembers(code) {
+    const roomSockets = io.sockets.adapter.rooms.get(code);
+    if (!roomSockets) return [];
+    const membersMap = new Map();
+    for (const socketId of roomSockets) {
+      const s = io.sockets.sockets.get(socketId);
+      if (s && s.user) {
+        membersMap.set(s.user.id, {
+          id: s.user.id,
+          username: s.user.username,
+        });
+      }
+    }
+    return Array.from(membersMap.values());
+  }
 
   // JWT Handshake Authentication Middleware
   io.use((socket, next) => {
@@ -91,13 +108,106 @@ function initSocket(httpServer) {
           joined_at: new Date().toISOString(),
         });
 
+        // Broadcast current active members list
+        io.to(code).emit('room_members', {
+          code,
+          members: getRoomMembers(code),
+        });
+
         if (typeof callback === 'function') {
-          callback({ ok: true, room: { id: room.id, code: room.code } });
+          callback({ ok: true, room: { id: room.id, code: room.code }, members: getRoomMembers(code) });
         }
       } catch (err) {
         console.error('Socket join_room error:', err);
         if (typeof callback === 'function') {
           callback({ ok: false, error: 'Failed to join room' });
+        }
+      }
+    });
+
+    // Typing start indicator
+    socket.on('typing_start', (data) => {
+      const code = data?.code ? String(data.code).trim().toUpperCase() : null;
+      if (!code) return;
+      socket.to(code).emit('user_typing', {
+        code,
+        user: {
+          id: socket.user.id,
+          username: socket.user.username,
+        },
+        isTyping: true,
+      });
+    });
+
+    // Typing stop indicator
+    socket.on('typing_stop', (data) => {
+      const code = data?.code ? String(data.code).trim().toUpperCase() : null;
+      if (!code) return;
+      socket.to(code).emit('user_typing', {
+        code,
+        user: {
+          id: socket.user.id,
+          username: socket.user.username,
+        },
+        isTyping: false,
+      });
+    });
+
+    // Mark single message seen
+    socket.on('mark_seen', async (data, callback) => {
+      try {
+        const code = data?.code ? String(data.code).trim().toUpperCase() : null;
+        const messageId = data?.messageId;
+        if (!code || !messageId) return;
+
+        await markMessageSeen(messageId, socket.user.id);
+
+        io.to(code).emit('message_seen', {
+          code,
+          messageId,
+          user: {
+            id: socket.user.id,
+            username: socket.user.username,
+          },
+        });
+
+        if (typeof callback === 'function') {
+          callback({ ok: true });
+        }
+      } catch (err) {
+        console.error('Socket mark_seen error:', err);
+        if (typeof callback === 'function') {
+          callback({ ok: false, error: 'Failed to mark message seen' });
+        }
+      }
+    });
+
+    // Mark all messages in room seen
+    socket.on('mark_all_seen', async (data, callback) => {
+      try {
+        const code = data?.code ? String(data.code).trim().toUpperCase() : null;
+        if (!code) return;
+
+        const room = await getRoomByCode(code);
+        if (!room) return;
+
+        await markAllMessagesSeen(room.id, socket.user.id);
+
+        io.to(code).emit('room_messages_seen', {
+          code,
+          user: {
+            id: socket.user.id,
+            username: socket.user.username,
+          },
+        });
+
+        if (typeof callback === 'function') {
+          callback({ ok: true });
+        }
+      } catch (err) {
+        console.error('Socket mark_all_seen error:', err);
+        if (typeof callback === 'function') {
+          callback({ ok: false, error: 'Failed to mark all messages seen' });
         }
       }
     });
@@ -156,10 +266,21 @@ function initSocket(httpServer) {
             username: socket.user.username,
           },
           created_at: savedMessage.created_at,
+          seen_by: [],
         };
 
         // Broadcast to all clients in the room including sender
         io.to(code).emit('new_message', messagePayload);
+
+        // Also stop typing status if currently typing
+        socket.to(code).emit('user_typing', {
+          code,
+          user: {
+            id: socket.user.id,
+            username: socket.user.username,
+          },
+          isTyping: false,
+        });
 
         if (typeof callback === 'function') {
           callback({ ok: true, message: messagePayload });
@@ -182,6 +303,24 @@ function initSocket(httpServer) {
           },
           left_at: new Date().toISOString(),
         });
+
+        // Also notify typing stop on disconnect
+        socket.to(code).emit('user_typing', {
+          code,
+          user: {
+            id: socket.user.id,
+            username: socket.user.username,
+          },
+          isTyping: false,
+        });
+
+        // Update online members after leaving
+        setTimeout(() => {
+          io.to(code).emit('room_members', {
+            code,
+            members: getRoomMembers(code),
+          });
+        }, 100);
       }
     });
   });

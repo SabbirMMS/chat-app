@@ -14,7 +14,10 @@ Supports both modern Web clients and mobile clients (Android) using the exact sa
 - **Validation**: Zod schema validation across all API routes and message boundaries.
 - **Rate Limiting**: In-memory IP-based rate limiting on `/api/auth/*` routes respecting reverse proxy / Cloudflare headers (`CF-Connecting-IP`, `X-Forwarded-For`).
 - **Room Code Generation**: Safe 6-character uppercase alphanumeric codes (`23456789ABCDEFGHJKMNPQRSTUVWXYZ`) omitting confusing characters (`0`, `O`, `1`, `I`, `L`).
-- **Web UI**: Modern dark theme built with Tailwind CSS, supporting room creation, room joining, instant link/code sharing, message history pagination, auto-scroll, and realtime presence.
+- **Typing Indicator**: Ephemeral realtime socket pub/sub emitting typing pings (`typing_start`, `typing_stop`, `user_typing`) with client-side debounce.
+- **Seen Member's List & Read Receipts**: Persistent message-level read tracking in PostgreSQL `message_reads` table with live broadcast (`mark_seen`, `mark_all_seen`, `message_seen`, `room_messages_seen`).
+- **Active Room Members Presence**: Realtime tracking of online room members (`room_members`) with live user count and member list.
+- **Web UI & Android Client**: Modern dark theme for web and native Java Android app with editable Base URL (for testing over Cloudflare Tunnel or local IP), message history pagination, auto-scroll, typing animation, and seen status indicators.
 
 ---
 
@@ -210,12 +213,35 @@ curl -s -X POST http://localhost:3000/api/rooms/join \
 
 ### 7. Get Room Message History
 - **`GET /api/rooms/:code/messages?limit=50&before=<iso_timestamp>`**
-- Returns messages in chronological order (oldest to newest). Only room members can access history (`403 Forbidden` if not a member).
+- Returns messages in chronological order (oldest to newest) along with `seen_by` members. Only room members can access history (`403 Forbidden` if not a member).
 - Headers: `Authorization: Bearer <token>`
 - Response: `200 OK`
 ```bash
 curl -s -X GET "http://localhost:3000/api/rooms/EHJH8K/messages?limit=50" \
   -H "Authorization: Bearer <JWT_TOKEN>"
+```
+
+Response format:
+```json
+{
+  "messages": [
+    {
+      "id": "742e313c-f243-480e-92da-240202888a3c",
+      "content": "Hello world",
+      "created_at": "2026-09-29T08:36:23.672Z",
+      "sender": {
+        "id": "3d22e355-fc01-4b5a-bfa0-f39350e96a2c",
+        "username": "alice"
+      },
+      "seen_by": [
+        {
+          "id": "ad235294-d8f3-4516-b314-b4e6c2435eb3",
+          "username": "bob"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ---
@@ -231,14 +257,30 @@ curl -s -X GET "http://localhost:3000/api/rooms/EHJH8K/messages?limit=50" \
 1. **`join_room`**
    - Payload: `{ code: "EHJH8K" }`
    - Ack Callback: `(response) => { ... }`
-   - Response: `{ ok: true, room: { id, code } }` or `{ ok: false, error: "..." }`
-   - Behavior: Verifies membership in PostgreSQL, joins the socket to room channel, and broadcasts `user_joined` to other members.
+   - Response: `{ ok: true, room: { id, code }, members: [...] }` or `{ ok: false, error: "..." }`
+   - Behavior: Verifies membership in PostgreSQL, joins socket to room channel, and broadcasts `user_joined` and `room_members`.
 
 2. **`send_message`**
    - Payload: `{ code: "EHJH8K", content: "Hello world" }`
    - Ack Callback: `(response) => { ... }`
-   - Response: `{ ok: true, message: { id, code, content, sender, created_at } }` or `{ ok: false, error: "..." }`
+   - Response: `{ ok: true, message: { id, code, content, sender, created_at, seen_by: [] } }`
    - Behavior: Validates membership + text length (1-2000 chars), persists to PostgreSQL, and broadcasts `new_message` to the room channel.
+
+3. **`typing_start`** (Typing Indicator Ping)
+   - Payload: `{ code: "EHJH8K" }`
+   - Behavior: Relays `user_typing` `{ isTyping: true }` to other room members.
+
+4. **`typing_stop`**
+   - Payload: `{ code: "EHJH8K" }`
+   - Behavior: Relays `user_typing` `{ isTyping: false }` to other room members.
+
+5. **`mark_seen`** (Read Receipt)
+   - Payload: `{ code: "EHJH8K", messageId: "<uuid>" }`
+   - Behavior: Records reader in PostgreSQL `message_reads` and broadcasts `message_seen` `{ messageId, user }`.
+
+6. **`mark_all_seen`**
+   - Payload: `{ code: "EHJH8K" }`
+   - Behavior: Records reader for all messages in the room in PostgreSQL `message_reads` and broadcasts `room_messages_seen` `{ user }`.
 
 ### Server to Client Events
 
@@ -249,33 +291,55 @@ curl -s -X GET "http://localhost:3000/api/rooms/EHJH8K/messages?limit=50" \
      "id": "742e313c-f243-480e-92da-240202888a3c",
      "code": "EHJH8K",
      "content": "Hello world",
-     "sender": {
-       "id": "3d22e355-fc01-4b5a-bfa0-f39350e96a2c",
-       "username": "alice"
-     },
-     "created_at": "2026-09-29T08:36:23.672Z"
+     "sender": { "id": "uuid", "username": "alice" },
+     "created_at": "2026-09-29T08:36:23.672Z",
+     "seen_by": []
    }
    ```
 
-2. **`user_joined`**
-   - Broadcast to existing room members when someone joins:
+2. **`user_typing`**
+   - Emitted when a room member starts or stops typing:
    ```json
    {
      "code": "EHJH8K",
-     "user": { "id": "uuid", "username": "bob" },
-     "joined_at": "2026-09-29T08:36:20.000Z"
+     "user": { "id": "uuid", "username": "alice" },
+     "isTyping": true
    }
    ```
 
-3. **`user_left`**
-   - Broadcast to room members on disconnect:
+3. **`message_seen`**
+   - Emitted when a room member reads a message:
    ```json
    {
      "code": "EHJH8K",
-     "user": { "id": "uuid", "username": "bob" },
-     "left_at": "2026-09-29T08:40:00.000Z"
+     "messageId": "742e313c-f243-480e-92da-240202888a3c",
+     "user": { "id": "uuid", "username": "bob" }
    }
    ```
+
+4. **`room_messages_seen`**
+   - Emitted when a room member marks all messages in a room as seen:
+   ```json
+   {
+     "code": "EHJH8K",
+     "user": { "id": "uuid", "username": "bob" }
+   }
+   ```
+
+5. **`room_members`**
+   - Emitted when users join or leave, listing currently active connected users:
+   ```json
+   {
+     "code": "EHJH8K",
+     "members": [
+       { "id": "uuid1", "username": "alice" },
+       { "id": "uuid2", "username": "bob" }
+     ]
+   }
+   ```
+
+6. **`user_joined` / `user_left`**
+   - Emitted on member connect or disconnect with timestamps.
 
 ---
 
@@ -340,164 +404,33 @@ When migrating to a VPS (Ubuntu/Debian):
 
 ---
 
-## Android Integration Guide (Kotlin)
+## Native Android Client (`Android App/`)
 
-The Android app communicates with the exact same REST API and Socket.IO server.
+A complete native Android app written in **Java** is located in [`Android App/`](./Android%20App). It uses **Retrofit 2**, **OkHttp 4**, **Gson**, and **Socket.IO Java Client (`io.socket:socket.io-client:2.1.1`)**.
 
-### 1. Dependencies (`build.gradle.kts`)
-```kotlin
-dependencies {
-    // Retrofit + OkHttp
-    implementation("com.squareup.retrofit2:retrofit:2.11.0")
-    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+### Features
+1. **Dynamic & Editable Base URL**:
+   - Stored in `SharedPreferences` via `PrefsManager`.
+   - Defaults to `http://10.0.2.2:3000` (for emulator localhost).
+   - Easily editable via the "Configure Server URL" dialog on Login, Register, or Dashboard (ideal for pointing to a Cloudflare Tunnel `https://chat.yourdomain.com` or local LAN IP `http://192.168.x.x:3000`).
+2. **Authentication**: Register and Login with JWT token saved to `SharedPreferences` and attached to all Retrofit requests via an OkHttp interceptor.
+3. **Room Management**:
+   - Create private room (generates safe 6-character code, one-tap copy, direct enter).
+   - Join existing room by 6-character code.
+   - List active rooms with member count and creator info (`SwipeRefreshLayout` + `RecyclerView`).
+4. **Realtime Chatting**:
+   - Loads initial message history via REST.
+   - Live updates via Socket.IO.
+   - **Typing Indicator Ping**: Text input watcher emits `typing_start` / `typing_stop` with 2.5s debounce; shows live `"Alice is typing..."` above input bar.
+   - **Seen Member's List / Read Receipts**: Emits `mark_seen` / `mark_all_seen`; displays `✓ Seen by [names]` under messages.
+   - **Active Room Members**: Top bar pill shows online count and opens dialog listing active users in the room.
 
-    // Socket.IO Client Java
-    implementation("io.socket:socket.io-client:2.1.1") {
-        exclude(group = "org.json", module = "json")
-    }
-}
+### Building & Running the Android App
+```bash
+cd "Android App"
+./gradlew assembleDebug
 ```
-
-### 2. Base URL & Retrofit REST Interface
-```kotlin
-object ApiConfig {
-    const val BASE_URL = "https://chat.yourdomain.com/"
-    var authToken: String? = null
-}
-
-data class AuthRequest(val username: String, val password: String)
-data class AuthResponse(val token: String, val user: UserDto)
-data class UserDto(val id: String, val username: String, val created_at: String)
-
-data class RoomDto(val id: String, val code: String, val created_by: String, val created_at: String)
-data class JoinRoomRequest(val code: String)
-data class MessagesResponse(val messages: List<MessageDto>)
-data class MessageDto(val id: String, val content: String, val created_at: String, val sender: UserDto)
-
-interface ChatApiService {
-    @POST("api/auth/login")
-    suspend fun login(@Body body: AuthRequest): retrofit2.Response<AuthResponse>
-
-    @POST("api/auth/register")
-    suspend fun register(@Body body: AuthRequest): retrofit2.Response<AuthResponse>
-
-    @POST("api/rooms")
-    suspend fun createRoom(): retrofit2.Response<Map<String, RoomDto>>
-
-    @POST("api/rooms/join")
-    suspend fun joinRoom(@Body body: JoinRoomRequest): retrofit2.Response<Map<String, RoomDto>>
-
-    @GET("api/rooms/{code}/messages")
-    suspend fun getMessages(
-        @Path("code") code: String,
-        @Query("limit") limit: Int = 50
-    ): retrofit2.Response<MessagesResponse>
-}
-```
-
-Add an OkHttp Interceptor to automatically attach the `Authorization` header:
-```kotlin
-val authInterceptor = Interceptor { chain ->
-    val original = chain.request()
-    val builder = original.newBuilder()
-    ApiConfig.authToken?.let { token ->
-        builder.header("Authorization", "Bearer $token")
-    }
-    chain.proceed(builder.build())
-}
-
-val okHttpClient = OkHttpClient.Builder()
-    .addInterceptor(authInterceptor)
-    .build()
-
-val retrofit = Retrofit.Builder()
-    .baseUrl(ApiConfig.BASE_URL)
-    .client(okHttpClient)
-    .addConverterFactory(GsonConverterFactory.create())
-    .build()
-
-val apiService = retrofit.create(ChatApiService::class.java)
-```
-
-### 3. Socket.IO Connection & Event Handlers
-Connect to Socket.IO using the JWT token and join a room:
-
-```kotlin
-import io.socket.client.IO
-import io.socket.client.Socket
-import org.json.JSONObject
-
-class ChatSocketManager(private val serverUrl: String, private val jwtToken: String) {
-    private var mSocket: Socket? = null
-
-    fun connect(roomCode: String, onNewMessage: (JSONObject) -> Unit) {
-        val options = IO.Options.builder()
-            .setPath("/socket.io")
-            .setAuth(mapOf("token" to jwtToken))
-            .setTransports(arrayOf("websocket", "polling"))
-            .build()
-
-        mSocket = IO.socket(serverUrl, options)
-
-        mSocket?.on(Socket.EVENT_CONNECT) {
-            println("Socket connected to server")
-
-            // Join the room
-            val joinPayload = JSONObject().apply {
-                put("code", roomCode)
-            }
-
-            mSocket?.emit("join_room", joinPayload, io.socket.client.Ack { args ->
-                val response = args.firstOrNull() as? JSONObject
-                if (response?.optBoolean("ok") == true) {
-                    println("Successfully joined room $roomCode via Socket.IO")
-                } else {
-                    System.err.println("Failed to join room: " + response?.optString("error"))
-                }
-            })
-        }
-
-        // Listen for new messages in realtime
-        mSocket?.on("new_message") { args ->
-            val data = args[0] as? JSONObject
-            if (data != null) {
-                onNewMessage(data)
-            }
-        }
-
-        // Listen for user presence
-        mSocket?.on("user_joined") { args ->
-            val data = args[0] as? JSONObject
-            println("User joined: ${data?.optJSONObject("user")?.optString("username")}")
-        }
-
-        mSocket?.connect()
-    }
-
-    fun sendMessage(roomCode: String, content: String, onResult: (Boolean, String?) -> Unit) {
-        val payload = JSONObject().apply {
-            put("code", roomCode)
-            put("content", content)
-        }
-
-        mSocket?.emit("send_message", payload, io.socket.client.Ack { args ->
-            val res = args.firstOrNull() as? JSONObject
-            if (res?.optBoolean("ok") == true) {
-                onResult(true, null)
-            } else {
-                onResult(false, res?.optString("error") ?: "Failed to send")
-            }
-        })
-    }
-
-    fun disconnect() {
-        mSocket?.disconnect()
-        mSocket?.off()
-    }
-}
-```
+Output APK: `Android App/app/build/outputs/apk/debug/app-debug.apk`
 
 ---
 
@@ -507,6 +440,9 @@ All features have been built, compiled, and verified end-to-end:
 1. `npm run build` succeeds cleanly with Next.js App Router static and dynamic routes.
 2. `node server.js` boots HTTP server and Socket.IO on port 3000 in a single process.
 3. User registration and login verified with bcrypt hashing, Zod validation, and JWT generation.
-4. Room creation with 6-character collision-free codes, membership checking, and message pagination verified against PostgreSQL.
+4. Room creation with 6-character collision-free codes, membership checking, and message pagination with `seen_by` verified against PostgreSQL.
 5. Socket.IO handshake authentication verified (unauthorized connections rejected, authorized connections accepted).
-6. Multi-client Socket.IO messaging verified with acknowledgment callbacks and realtime room broadcast.
+6. Realtime multi-client Socket.IO messaging verified with acknowledgment callbacks and room broadcast.
+7. Realtime typing indicators verified with debounce and status broadcast (`user_typing`).
+8. Realtime seen receipts verified with PostgreSQL persistence (`message_reads`) and live room broadcast (`message_seen`).
+9. Native Android application built with `./gradlew assembleDebug` (`BUILD SUCCESSFUL`).

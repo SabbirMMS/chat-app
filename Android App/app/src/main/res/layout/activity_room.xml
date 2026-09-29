@@ -68,6 +68,36 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
+        <!-- Online Members Pill -->
+        <LinearLayout
+            android:id="@+id/layoutMembersPill"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_button_secondary"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="4dp">
+
+            <ImageView
+                android:layout_width="12dp"
+                android:layout_height="12dp"
+                android:src="@drawable/ic_users"
+                app:tint="@color/primary_indigo" />
+
+            <TextView
+                android:id="@+id/tvOnlineCount"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="1 online"
+                android:textColor="@color/slate_300"
+                android:textSize="11sp" />
+        </LinearLayout>
+
         <!-- Status indicator badge -->
         <LinearLayout
             android:id="@+id/layoutStatus"
@@ -146,6 +176,22 @@
             android:visibility="gone" />
 
     </FrameLayout>
+
+    <!-- Typing Indicator Banner -->
+    <TextView
+        android:id="@+id/tvTypingIndicator"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/slate_900"
+        android:paddingStart="16dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="4dp"
+        android:text="alice is typing..."
+        android:textColor="@color/primary_indigo"
+        android:textSize="12sp"
+        android:textStyle="italic"
+        android:visibility="gone" />
 
     <!-- Bottom Message Input Bar -->
     <LinearLayout

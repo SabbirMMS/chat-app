@@ -52,4 +52,16 @@
             android:textSize="14sp" />
     </LinearLayout>
 
+    <!-- Seen by member's list -->
+    <TextView
+        android:id="@+id/tvSeenByOther"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="2dp"
+        android:text="Seen by bob"
+        android:textColor="@color/slate_400"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
 </LinearLayout>
